@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import collections
 import logging
 import random
 
@@ -9,14 +10,28 @@ from django.core.exceptions import ImproperlyConfigured
 from redis.sentinel import Sentinel
 
 from django_redis.client import DefaultClient
+from django_redis.exceptions import ConnectionInterrupted
+from redis.exceptions import ReadOnlyError
 
 DJANGO_REDIS_LOGGER = getattr(settings, "DJANGO_REDIS_LOGGER", False)
 
 
 class SentinelClient(DefaultClient):
     """
-    Sentinel client object extending django-redis DefaultClient
+    Sentinel client object extending DefaultClientAdapter(django-redis DefaultClient)
     """
+
+    def exception_check(self, func):
+        """
+        Decorator used to deal with exceptions
+        """
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except (ConnectionError, ReadOnlyError, ConnectionInterrupted) as e:
+                self.close()  # closing old connections to reinitialize client
+                raise ConnectionResetError(f'Error: {e}, closing old connections')
+        return wrapper
 
     def __init__(self, server, params, backend):
         """
@@ -28,6 +43,13 @@ class SentinelClient(DefaultClient):
         self._client_read = None
         self._connection_string = server
         self.log = logging.getLogger((DJANGO_REDIS_LOGGER or __name__))
+
+        for attr in ['set', 'incr_version', 'add', 'get', 'persist', 'expire',
+                     'lock', 'delete', 'delete_pattern', 'delete_many', 'clear',
+                     'get_many', 'set_many', 'incr', 'decr', 'ttl', 'has_key',
+                     'iter_keys', 'keys']:
+            if isinstance(getattr(self, attr), collections.Callable):
+                setattr(self, attr, self.exception_check(getattr(self, attr)))
 
     def parse_connection_string(self, constring):
         """
